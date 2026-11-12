@@ -1,0 +1,17 @@
+[
+  {
+    "property": "zen.undo-close-tabs.enabled",
+    "label": "Cmd+Z / Ctrl+Z restores recently closed tabs",
+    "type": "checkbox",
+    "defaultValue": true,
+    "description": "Works after closing one tab and after Clear. Typing in a text field still uses Cmd+Z as normal text undo."
+  },
+  {
+    "property": "zen.undo-close-tabs.window-minutes",
+    "label": "How long after closing Cmd+Z can still restore (minutes)",
+    "type": "string",
+    "placeholder": "15",
+    "defaultValue": "15",
+    "description": "Stops Cmd+Z from reopening tabs you closed ages ago. Use 0 for no limit."
+  }
+]
