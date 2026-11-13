@@ -45,6 +45,45 @@
     }
   };
 
+  // ---- Tiny diagnostics log (profile folder, undo-close-tabs.log) ------------
+  // One line per Cmd+Z press that this mod considered. Helps explain "it didn't restore".
+  let logPath = null;
+  try {
+    logPath = PathUtils.join(PathUtils.profileDir, "undo-close-tabs.log");
+    IOUtils.stat(logPath).then(
+      (st) => { if (st.size > 100000) IOUtils.remove(logPath).catch(() => {}); },
+      () => {}
+    );
+  } catch (_e) {}
+  const writeLog = (line) => {
+    if (!logPath) return;
+    try {
+      IOUtils.writeUTF8(logPath, new Date().toISOString() + " " + line + "\n", { mode: "appendOrCreate" }).catch(() => {});
+    } catch (_e) {}
+  };
+  const describeFocus = () => {
+    const parts = [];
+    let el = document.activeElement;
+    while (el) {
+      parts.push(el.localName + (el.id ? "#" + el.id : ""));
+      el = el.shadowRoot?.activeElement || null;
+    }
+    return parts.join(">");
+  };
+
+  // Firefox only remembers the last 25 closed tabs by default, so clearing 40 tabs could
+  // only ever bring back 25. Raise the limit (never lowers a value you set higher).
+  const MIN_UNDO_DEPTH = 100;
+  try {
+    const depth = Services.prefs.getIntPref("browser.sessionstore.max_tabs_undo", 25);
+    if (depth < MIN_UNDO_DEPTH) {
+      Services.prefs.setIntPref("browser.sessionstore.max_tabs_undo", MIN_UNDO_DEPTH);
+      writeLog("raised browser.sessionstore.max_tabs_undo " + depth + " -> " + MIN_UNDO_DEPTH);
+    }
+  } catch (e) {
+    warn("could not raise undo depth", e);
+  }
+
   // ---- Is there something recent to restore? ---------------------------------
   const lastClosedTabAge = () => {
     try {
@@ -67,21 +106,42 @@
   };
 
   // ---- Restore ---------------------------------------------------------------
+  // How many tabs were closed "together" most recently (one tab, or a whole Clear).
+  // Firefox's own last-batch counter accumulates across closes, which could bring
+  // back more than you cleared, so batches are worked out from the close times.
+  const BATCH_GAP_MS = 700;
+  const lastBatchSize = () => {
+    const data = SessionStore.getClosedTabDataForWindow(window) || [];
+    if (!data.length) return 0;
+    let n = 1;
+    while (
+      n < data.length &&
+      typeof data[n - 1].closedAt === "number" &&
+      typeof data[n].closedAt === "number" &&
+      data[n - 1].closedAt - data[n].closedAt <= BATCH_GAP_MS
+    ) {
+      n++;
+    }
+    return n;
+  };
+
   const restoreClosedTabs = () => {
-    // Preferred: Firefox's own batch-aware undo.
-    if (window.SessionWindowUI?.undoCloseTab) {
-      window.SessionWindowUI.undoCloseTab(window);
-      return true;
+    const ui = window.SessionWindowUI;
+    if (ui?.undoCloseTab) {
+      // Restoring index 0 repeatedly walks back newest-first, one batch worth.
+      const n = Math.max(1, lastBatchSize());
+      for (let i = 0; i < n; i++) ui.undoCloseTab(window, 0);
+      return n;
     }
     if (typeof window.undoCloseTab === "function") {
       window.undoCloseTab();
-      return true;
+      return 1;
     }
     if (typeof window.goDoCommand === "function") {
       window.goDoCommand("History:UndoCloseTab");
-      return true;
+      return 1;
     }
-    return false;
+    return 0;
   };
 
   // ---- Don't steal Cmd+Z from text editing -----------------------------------
@@ -98,11 +158,26 @@
     "button", "checkbox", "radio", "range", "color", "file",
     "image", "reset", "submit",
   ]);
+  // True only if Cmd+Z would really undo text here. An empty/untouched field (e.g. the
+  // URL bar Zen focuses after Clear) has nothing to undo, so the key is free for us.
+  const canUndoText = (el) => {
+    try {
+      const editor = el.editor;
+      if (editor && typeof editor.canUndo === "boolean") return editor.canUndo;
+    } catch (_e) {}
+    return true; // can't tell -> assume the field wants the key
+  };
   const isEditableElement = (el) => {
     if (!el || el.nodeType !== 1) return false;
+    // URL bar: Zen focuses it (empty) after Clear. Only yield if YOU typed in it.
+    if (el.id === "urlbar-input" && typeof window.gURLBar?.valueIsTyped === "boolean") {
+      return window.gURLBar.valueIsTyped;
+    }
     const tag = el.localName;
-    if (tag === "textarea") return true;
-    if (tag === "input") return !NON_TEXT_INPUTS.has((el.type || "text").toLowerCase());
+    if (tag === "textarea") return canUndoText(el);
+    if (tag === "input") {
+      return !NON_TEXT_INPUTS.has((el.type || "text").toLowerCase()) && canUndoText(el);
+    }
     return !!el.isContentEditable;
   };
 
@@ -169,18 +244,26 @@
     try {
       if (event.defaultPrevented || event.isComposing) return;
       if (!isUndoShortcut(event)) return;
-      if (!isEnabled()) return;
+      if (!isEnabled()) return writeLog("skip: disabled");
       // A key press produces keydown + keypress; only act once per press.
       if (event.timeStamp - lastHandled < 150) return;
-      if (isTextEditing(event)) return;
-      if (!hasRecentClosedTab()) return;
-      if (restoreClosedTabs()) {
+      const focus = describeFocus();
+      if (isTextEditing(event)) return writeLog("skip: text field has undo history; focus=" + focus);
+      if (!hasRecentClosedTab()) {
+        return writeLog("skip: nothing recent; closed=" + (lastClosedTabAge() === null ? "none" : Math.round(lastClosedTabAge() / 1000) + "s ago") + "; focus=" + focus);
+      }
+      const restored = restoreClosedTabs();
+      if (restored) {
         lastHandled = event.timeStamp;
         event.preventDefault();
         event.stopPropagation();
+        writeLog("restored " + restored + " tab(s); focus=" + focus);
+      } else {
+        writeLog("skip: no restore function found");
       }
     } catch (e) {
       warn("undo failed", e);
+      writeLog("error: " + e);
     }
   };
 
