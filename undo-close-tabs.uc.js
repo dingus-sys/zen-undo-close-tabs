@@ -240,26 +240,30 @@
   };
 
   let lastHandled = 0;
-  const onKey = (event) => {
+  const onKey = (event, phase) => {
     try {
-      if (event.defaultPrevented || event.isComposing) return;
       if (!isUndoShortcut(event)) return;
-      if (!isEnabled()) return writeLog("skip: disabled");
-      // A key press produces keydown + keypress; only act once per press.
-      if (event.timeStamp - lastHandled < 150) return;
       const focus = describeFocus();
-      if (isTextEditing(event)) return writeLog("skip: text field has undo history; focus=" + focus);
+      // Log every Cmd+Z the window sees (and which listener saw it) so a "nothing happened"
+      // report can be traced to the exact step that stopped it.
+      const tag = phase + (event.defaultPrevented ? "(already handled)" : "");
+      if (event.defaultPrevented || event.isComposing) return writeLog("skip[" + tag + "]: key already handled by something else; focus=" + focus);
+      if (!isEnabled()) return writeLog("skip[" + tag + "]: disabled");
+      // The same press arrives in several phases; act once per press.
+      if (event.timeStamp - lastHandled < 150) return;
+      if (isTextEditing(event)) return writeLog("skip[" + tag + "]: you typed in a text field; focus=" + focus);
       if (!hasRecentClosedTab()) {
-        return writeLog("skip: nothing recent; closed=" + (lastClosedTabAge() === null ? "none" : Math.round(lastClosedTabAge() / 1000) + "s ago") + "; focus=" + focus);
+        const age = lastClosedTabAge();
+        return writeLog("skip[" + tag + "]: nothing recent; closed=" + (age === null ? "none" : Math.round(age / 1000) + "s ago") + "; focus=" + focus);
       }
       const restored = restoreClosedTabs();
       if (restored) {
         lastHandled = event.timeStamp;
         event.preventDefault();
         event.stopPropagation();
-        writeLog("restored " + restored + " tab(s); focus=" + focus);
+        writeLog("restored " + restored + " tab(s) [" + tag + "]; focus=" + focus);
       } else {
-        writeLog("skip: no restore function found");
+        writeLog("skip[" + tag + "]: no restore function found");
       }
     } catch (e) {
       warn("undo failed", e);
@@ -267,10 +271,15 @@
     }
   };
 
-  // mozSystemGroup = same phase XUL <key> shortcuts run in: AFTER web pages and
-  // text editors have had their chance to handle (and cancel) the key.
-  window.addEventListener("keypress", onKey, { mozSystemGroup: true });
-  window.addEventListener("keydown", onKey, { mozSystemGroup: true });
+  // Two listeners, because the right moment depends on where focus is:
+  //  - Focus in Zen's own UI (sidebar, buttons, toolbar, after clicking Clear): act FIRST
+  //    (capture phase), before Firefox's built-in Edit>Undo key or anything else can swallow it.
+  //  - Focus on a web page: act LAST (system group), after the page and its text fields have
+  //    had their chance to use Cmd+Z.
+  const focusIsWebPage = () => document.activeElement?.localName === "browser";
+  window.addEventListener("keydown", (e) => { if (!focusIsWebPage()) onKey(e, "ui"); }, true);
+  window.addEventListener("keydown", (e) => { if (focusIsWebPage()) onKey(e, "page"); }, { mozSystemGroup: true });
+  window.addEventListener("keypress", (e) => { if (focusIsWebPage()) onKey(e, "page-keypress"); }, { mozSystemGroup: true });
 
   // ---- Make the "tabs cleared" toast tell the truth --------------------------
   // Zen's toast says "Press <shortcut> to restore". Tidy Tabs' clear patch passes the
