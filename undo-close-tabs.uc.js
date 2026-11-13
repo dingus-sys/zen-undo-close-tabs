@@ -305,5 +305,17 @@
     }, 500);
   }
 
+  // Proof-of-life for troubleshooting: logs once at load, and notes the first few
+  // Cmd/Ctrl key presses (key name only) so "is the mod even receiving keys?" is answerable.
+  writeLog("loaded v1.3 mac=" + IS_MAC + " pageGuard=" + pageGuardWorks + " enabled=" + isEnabled());
+  let sightings = 0;
+  window.addEventListener("keydown", (e) => {
+    if (sightings >= 3) return;
+    if (!(IS_MAC ? e.metaKey : e.ctrlKey)) return;
+    if (/^Meta$|^Control$|^Shift$|^Alt$/.test(e.key)) return;
+    sightings++;
+    writeLog("saw " + (IS_MAC ? "Cmd+" : "Ctrl+") + (e.key || "?").toLowerCase() + " (diagnostic " + sightings + "/3)");
+  }, true);
+
   log("ready; press", SHORTCUT_LABEL, "to restore recently closed tabs");
 })();
